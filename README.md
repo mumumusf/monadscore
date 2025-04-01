@@ -4,7 +4,7 @@
   <a href="README.md">中文</a> | <a href="README_EN.md">English</a>
 </div>
 
-## �� 使用说明
+##  使用说明
 
 ### 1. 注册账号
 首先访问 [MonadScore](https://monadscore.xyz/signup/r/D1b91KrI) 注册账号
