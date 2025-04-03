@@ -59,14 +59,18 @@ function getRandomUserAgent() {
  * 获取请求头
  * @returns {Object} 请求头对象
  */
-function getHeaders() {
-  return {
+function getHeaders(token = null) {
+  const headers = {
     'User-Agent': getRandomUserAgent(),
     'Accept': 'application/json, text/plain, */*',
     'Content-Type': 'application/json',
-    'origin': 'https://monadscore.xyz',
-    'referer': 'https://monadscore.xyz/'
+    'Origin': 'https://monadscore.xyz',
+    'Referer': 'https://monadscore.xyz/'
   };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 /**
@@ -74,9 +78,9 @@ function getHeaders() {
  * @param {string} proxy 代理地址
  * @returns {Object} Axios配置对象
  */
-function getAxiosConfig(proxy) {
+function getAxiosConfig(proxy, token = null) {
   const config = {
-    headers: getHeaders(),
+    headers: getHeaders(token),
     timeout: 60000
   };
   if (proxy) {
@@ -91,7 +95,7 @@ function getAxiosConfig(proxy) {
  * @returns {Object} 代理代理对象
  */
 function newAgent(proxy) {
-  if (proxy.startsWith('http://')) {
+  if (proxy.startsWith('http://') || proxy.startsWith('https://')) {
     return new HttpsProxyAgent(proxy);
   } else if (proxy.startsWith('socks4://') || proxy.startsWith('socks5://')) {
     return new SocksProxyAgent(proxy);
@@ -156,17 +160,45 @@ async function getPublicIP(proxy) {
 }
 
 /**
+ * 获取初始化token
+ * @param {string} walletAddress 钱包地址
+ * @param {string} proxy 代理地址
+ * @returns {Promise<string>} 初始化token
+ */
+async function getInitialToken(walletAddress, proxy) {
+  const url = 'https://mscore.onrender.com/user';
+  const payload = { wallet: walletAddress, invite: null };
+  const response = await requestWithRetry('post', url, payload, getAxiosConfig(proxy));
+  return response.data.token;
+}
+
+/**
+ * 登录用户
+ * @param {string} walletAddress 钱包地址
+ * @param {string} proxy 代理地址
+ * @param {string} initialToken 初始化token
+ * @returns {Promise<string>} 登录token
+ */
+async function loginUser(walletAddress, proxy, initialToken) {
+  const url = 'https://mscore.onrender.com/user/login';
+  const payload = { wallet: walletAddress };
+  const response = await requestWithRetry('post', url, payload, getAxiosConfig(proxy, initialToken));
+  return response.data.token;
+}
+
+/**
  * 领取任务
  * @param {string} walletAddress 钱包地址
  * @param {string} taskId 任务ID
  * @param {string} proxy 代理地址
+ * @param {string} token 登录token
  * @returns {Promise<string>} 任务领取结果
  */
-async function claimTask(walletAddress, taskId, proxy) {
+async function claimTask(walletAddress, taskId, proxy, token) {
   const url = 'https://mscore.onrender.com/user/claim-task';
   const payload = { wallet: walletAddress, taskId };
   try {
-    const response = await requestWithRetry('post', url, payload, getAxiosConfig(proxy));
+    const response = await requestWithRetry('post', url, payload, getAxiosConfig(proxy, token));
     return response.data && response.data.message
       ? response.data.message
       : '任务领取成功，但服务器未返回消息。';
@@ -179,13 +211,14 @@ async function claimTask(walletAddress, taskId, proxy) {
  * 更新开始时间
  * @param {string} walletAddress 钱包地址
  * @param {string} proxy 代理地址
+ * @param {string} token 登录token
  * @returns {Promise<Object>} 更新结果
  */
-async function updateStartTime(walletAddress, proxy) {
+async function updateStartTime(walletAddress, proxy, token) {
   const url = 'https://mscore.onrender.com/user/update-start-time';
   const payload = { wallet: walletAddress, startTime: Date.now() };
   try {
-    const response = await requestWithRetry('put', url, payload, getAxiosConfig(proxy));
+    const response = await requestWithRetry('put', url, payload, getAxiosConfig(proxy, token));
     const message = response.data && response.data.message ? response.data.message : '节点启动成功';
     const totalPoints =
       response.data && response.data.user && response.data.user.totalPoints !== undefined
@@ -227,27 +260,54 @@ async function processAccount(account, index, total, proxy) {
     return;
   }
 
+  const spinnerAuth = ora({ text: '正在进行身份验证...', spinner: 'dots2', color: 'cyan' }).start();
+  let loginToken;
+  try {
+    const initialToken = await getInitialToken(walletAddress, proxy);
+    spinnerAuth.text = '正在签名钱包...';
+    await delay(0.5);
+
+    const signMessage = `Request from
+
+monadscore.xyz
+
+Message
+
+Sign this message to verify ownership and continue to dashboard!
+
+${walletAddress}`;
+    await wallet.signMessage(signMessage);
+    spinnerAuth.text = '签名成功';
+    await delay(0.5);
+
+    loginToken = await loginUser(walletAddress, proxy, initialToken);
+    spinnerAuth.succeed(chalk.greenBright('身份验证成功'));
+  } catch (error) {
+    spinnerAuth.fail(chalk.red(`身份验证失败: ${error.message}`));
+    return;
+  }
+
   const tasks = ['task003', 'task002', 'task001'];
   for (let i = 0; i < tasks.length; i++) {
     const spinnerTask = ora({ text: `正在领取任务 ${i + 1}/3 ...`, spinner: 'dots2', color: 'cyan' }).start();
-    const msg = await claimTask(walletAddress, tasks[i], proxy);
+    const msg = await claimTask(walletAddress, tasks[i], proxy, loginToken);
     if (msg.toLowerCase().includes('successfully') || msg.toLowerCase().includes('berhasil')) {
-      spinnerTask.succeed(chalk.greenBright(` 领取任务 ${i + 1}/3: ${msg}`));
+      spinnerTask.succeed(chalk.greenBright(`领取任务 ${i + 1}/3 成功`));
     } else {
-      spinnerTask.fail(chalk.red(` 领取任务 ${i + 1}/3: ${msg}`));
+      spinnerTask.fail(chalk.red(` ${msg}`));
     }
   }
 
   const spinnerStart = ora({ text: '正在启动节点...', spinner: 'dots2', color: 'cyan' }).start();
-  const { message, totalPoints } = await updateStartTime(walletAddress, proxy);
+  const { message, totalPoints } = await updateStartTime(walletAddress, proxy, loginToken);
   if (message.toLowerCase().includes('successfully') || message.toLowerCase().includes('berhasil')) {
-    spinnerStart.succeed(chalk.greenBright(` 节点启动成功: ${message}`));
+    spinnerStart.succeed(chalk.greenBright(`节点启动成功: ${message}`));
   } else {
-    spinnerStart.fail(chalk.red(` 节点启动失败: ${message}`));
+    spinnerStart.fail(chalk.red(`节点启动失败: ${message}`));
   }
 
   const spinnerPoints = ora({ text: '正在获取总积分...', spinner: 'dots2', color: 'cyan' }).start();
-  spinnerPoints.succeed(chalk.greenBright(` 总积分: ${totalPoints}`));
+  spinnerPoints.succeed(chalk.greenBright(`总积分: ${totalPoints}`));
 }
 
 /**
